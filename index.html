@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Space with 3D Model</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="container">
+        <canvas id="ar-canvas"></canvas>
+        <div id="ui">
+            <div id="ar-controls">
+                <button id="ar-button" class="btn btn--primary btn--lg">Start AR</button>
+                <button id="stop-ar-button" class="btn btn--secondary btn--lg hidden">Stop AR</button>
+            </div>
+            <div id="instructions">
+                <p id="instruction-text">Click "Start AR" to begin augmented reality experience</p>
+            </div>
+            <div id="status" class="status status--info hidden">
+                <span id="status-text">Loading...</span>
+            </div>
+            <div id="fallback-message" class="hidden">
+                <p>WebXR AR is not supported on this device. Showing 3D preview instead.</p>
+            </div>
+        </div>
+        <div id="reticle" class="hidden"></div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
