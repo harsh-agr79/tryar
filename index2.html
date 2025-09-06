@@ -5,519 +5,481 @@
     <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
     <meta name='mobile-web-app-capable' content='yes'>
     <meta name='apple-mobile-web-app-capable' content='yes'>
-    <link rel='icon' type='image/png' sizes='32x32' href='favicon-32x32.png'>
-    <link rel='icon' type='image/png' sizes='96x96' href='favicon-96x96.png'>
-    <link rel='stylesheet' href='css/common.css'>
-
-    <title>AR 3D Object</title>
+    <title>Barebones AR — 3D object, tap to change color, sticky placement</title>
     <style>
-      body {
-        margin: 0;
-        padding: 0;
-        background: #000;
-        color: #fff;
-        font-family: Arial, sans-serif;
-      }
-      
-      #overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        z-index: 1000;
-        pointer-events: none;
-      }
-      
-      #overlay > * {
-        pointer-events: auto;
-      }
-      
-      .barebones-button {
-        background: #007acc;
-        color: white;
-        border: none;
-        padding: 10px 20px;
-        font-size: 16px;
-        border-radius: 5px;
-        cursor: pointer;
-      }
-      
-      .barebones-button:disabled {
-        background: #666;
-        cursor: not-allowed;
-      }
-
-      main {
-        text-align: center;
-        padding: 50px;
-      }
-
-      #instructions {
-        background: rgba(0,0,0,0.8);
-        padding: 10px;
-        border-radius: 5px;
-        margin: 10px;
-      }
+      html,body{height:100%;margin:0;background:#111;color:#eee;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
+      #overlay{position: absolute; left: 8px; top: 8px; z-index: 10; max-width: 320px; background: rgba(0,0,0,0.45); padding:8px;border-radius:8px;}
+      #overlay summary{cursor:pointer}
+      #xr-button{margin-top:6px;padding:8px 10px;border-radius:6px;border:none;background:#0a84ff;color:white;font-weight:600}
+      #xr-button[disabled]{opacity:0.5;background:#666}
+      #session-info, #pose, #warning-zone{font-size:13px;margin-top:6px}
+      canvas.three-canvas{position: absolute; inset: 0; width:100%; height:100%; touch-action: none; z-index: 1;}
+      main{position: absolute; left:0;right:0;bottom:16px;text-align:center;z-index:9;color:#ccc}
     </style>
   </head>
   <body>
     <div id="overlay">
       <header>
         <details open>
-          <summary>AR 3D Object Demo</summary>
-          <p>
-            This demo places a color-changing 3D cube in AR space. 
-            Tap the screen to place cubes at detected surfaces.
-            <a class="back" href="./index.html">Back</a>
+          <summary>Barebones WebXR DOM Overlay — with 3D object</summary>
+          <p style="font-size:13px;margin:6px 0;">
+            Tap 'Enter AR' to start an AR session. Tap the bright reticle to place the object. Tap the object again to change its color.
           </p>
           <div id="session-info"></div>
           <div id="pose"></div>
-          <div id="instructions" style="display: none;">
-            Tap to place a cube on detected surfaces
-          </div>
           <div id="warning-zone"></div>
-          <button id="xr-button" class="barebones-button" disabled>XR not found</button>
+          <button id="xr-button" disabled>Checking AR...</button>
         </details>
       </header>
     </div>
-    <main style='text-align: center;'>
-      <p>Click 'Enter AR' to see 3D content</p>
+
+    <main>
+      <p>Tap the object to change its color. On desktop: drag to orbit, click to place.</p>
     </main>
 
+    <!-- three.js (module build) -->
     <script type="module">
-      // XR globals
-      let xrButton = document.getElementById('xr-button');
-      let xrSession = null;
-      let xrRefSpace = null;
-      let hitTestSource = null;
+      import * as THREE from 'https://unpkg.com/three@0.155.0/build/three.module.js';
+      import { OrbitControls } from 'https://unpkg.com/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 
-      // WebGL scene globals
-      let gl = null;
-      let shaderProgram = null;
-      let cubeBuffer = null;
-      let indexBuffer = null;
+      // UI elements
+      const xrButton = document.getElementById('xr-button');
+      const sessionInfo = document.getElementById('session-info');
+      const poseInfo = document.getElementById('pose');
+      const warningZone = document.getElementById('warning-zone');
+
+      // three.js globals
+      let renderer, scene, camera, controls;
       let reticle = null;
-      let placedCubes = [];
+      let object3D = null;           // the main 3D object
+      let placed = false;
+      let anchor = null;             // XRAnchor if created
+      let savedPoseMatrix = null;    // fallback pose matrix if anchors unsupported
+      let hitTestSource = null;
+      let xrRefSpace = null;
+      let xrSession = null;
 
-      // Matrix math utilities
-      class Mat4 {
-        static create() {
-          return new Float32Array(16);
-        }
+      let colors = [0x1e90ff, 0xff6b6b, 0x72f0a1, 0xffd86b];
+      let colorIndex = 0;
 
-        static identity(out) {
-          out[0] = 1; out[1] = 0; out[2] = 0; out[3] = 0;
-          out[4] = 0; out[5] = 1; out[6] = 0; out[7] = 0;
-          out[8] = 0; out[9] = 0; out[10] = 1; out[11] = 0;
-          out[12] = 0; out[13] = 0; out[14] = 0; out[15] = 1;
-          return out;
-        }
+      // Initialize three.js preview (non-AR fallback)
+      function initThree() {
+        // create renderer
+        const canvas = document.createElement('canvas');
+        canvas.classList.add('three-canvas');
+        document.body.appendChild(canvas);
+        renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.outputEncoding = THREE.sRGBEncoding;
+        renderer.xr.enabled = true;
 
-        static multiply(out, a, b) {
-          let a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
-          let a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
-          let a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
-          let a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
+        // scene & camera
+        scene = new THREE.Scene();
+        scene.background = null; // transparent (AR camera feed will show behind)
+        camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 20);
+        camera.position.set(0.8, 0.6, 1.2);
 
-          let b0 = b[0], b1 = b[1], b2 = b[2], b3 = b[3];
-          out[0] = b0*a00 + b1*a10 + b2*a20 + b3*a30;
-          out[1] = b0*a01 + b1*a11 + b2*a21 + b3*a31;
-          out[2] = b0*a02 + b1*a12 + b2*a22 + b3*a32;
-          out[3] = b0*a03 + b1*a13 + b2*a23 + b3*a33;
+        // lights
+        const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+        scene.add(hemi);
+        const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+        dir.position.set(0.5, 2, 0.5);
+        scene.add(dir);
 
-          b0 = b[4]; b1 = b[5]; b2 = b[6]; b3 = b[7];
-          out[4] = b0*a00 + b1*a10 + b2*a20 + b3*a30;
-          out[5] = b0*a01 + b1*a11 + b2*a21 + b3*a31;
-          out[6] = b0*a02 + b1*a12 + b2*a22 + b3*a32;
-          out[7] = b0*a03 + b1*a13 + b2*a23 + b3*a33;
+        // grid for preview
+        const grid = new THREE.GridHelper(3, 24, 0x444444, 0x111111);
+        grid.material.opacity = 0.15;
+        grid.material.transparent = true;
+        scene.add(grid);
 
-          b0 = b[8]; b1 = b[9]; b2 = b[10]; b3 = b[11];
-          out[8] = b0*a00 + b1*a10 + b2*a20 + b3*a30;
-          out[9] = b0*a01 + b1*a11 + b2*a21 + b3*a31;
-          out[10] = b0*a02 + b1*a12 + b2*a22 + b3*a32;
-          out[11] = b0*a03 + b1*a13 + b2*a23 + b3*a33;
+        // reticle (invisible until hit)
+        const ringGeo = new THREE.RingGeometry(0.06, 0.09, 32).rotateX(-Math.PI/2);
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, opacity:0.85, transparent:true });
+        reticle = new THREE.Mesh(ringGeo, ringMat);
+        reticle.matrixAutoUpdate = false;
+        reticle.visible = false;
+        scene.add(reticle);
 
-          b0 = b[12]; b1 = b[13]; b2 = b[14]; b3 = b[15];
-          out[12] = b0*a00 + b1*a10 + b2*a20 + b3*a30;
-          out[13] = b0*a01 + b1*a11 + b2*a21 + b3*a31;
-          out[14] = b0*a02 + b1*a12 + b2*a22 + b3*a32;
-          out[15] = b0*a03 + b1*a13 + b2*a23 + b3*a33;
-          return out;
-        }
+        // object (complex extruded polygon)
+        object3D = createComplexPolygonMesh();
+        object3D.visible = true; // preview visible by default
+        scene.add(object3D);
 
-        static translate(out, a, v) {
-          let x = v[0], y = v[1], z = v[2];
-          out[0] = a[0]; out[1] = a[1]; out[2] = a[2]; out[3] = a[3];
-          out[4] = a[4]; out[5] = a[5]; out[6] = a[6]; out[7] = a[7];
-          out[8] = a[8]; out[9] = a[9]; out[10] = a[10]; out[11] = a[11];
-          out[12] = a[0] * x + a[4] * y + a[8] * z + a[12];
-          out[13] = a[1] * x + a[5] * y + a[9] * z + a[13];
-          out[14] = a[2] * x + a[6] * y + a[10] * z + a[14];
-          out[15] = a[3] * x + a[7] * y + a[11] * z + a[15];
-          return out;
-        }
+        // Orbit controls for desktop
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0.08, 0);
+        controls.update();
 
-        static scale(out, a, v) {
-          let x = v[0], y = v[1], z = v[2];
-          out[0] = a[0] * x; out[1] = a[1] * x; out[2] = a[2] * x; out[3] = a[3] * x;
-          out[4] = a[4] * y; out[5] = a[5] * y; out[6] = a[6] * y; out[7] = a[7] * y;
-          out[8] = a[8] * z; out[9] = a[9] * z; out[10] = a[10] * z; out[11] = a[11] * z;
-          out[12] = a[12]; out[13] = a[13]; out[14] = a[14]; out[15] = a[15];
-          return out;
-        }
+        // pointer events (touch/click)
+        renderer.domElement.addEventListener('click', onPointerClick);
+
+        window.addEventListener('resize', onWindowResize);
+
+        // start render loop
+        renderer.setAnimationLoop(render);
       }
 
-      // Shader source code
-      const vertexShaderSource = `
-        attribute vec4 aVertexPosition;
-        attribute vec3 aVertexNormal;
-        
-        uniform mat4 uModelViewMatrix;
-        uniform mat4 uProjectionMatrix;
-        uniform mat4 uNormalMatrix;
-        uniform vec3 uColor;
-        uniform float uTime;
-        
-        varying vec3 vColor;
-        varying vec3 vNormal;
-        
-        void main(void) {
-          gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
-          vNormal = (uNormalMatrix * vec4(aVertexNormal, 0.0)).xyz;
-          
-          // Animate color based on time and position
-          float colorShift = sin(uTime * 0.002 + aVertexPosition.x + aVertexPosition.y) * 0.5 + 0.5;
-          vColor = mix(uColor, vec3(1.0 - uColor.r, 1.0 - uColor.g, 1.0 - uColor.b), colorShift);
-        }
-      `;
-
-      const fragmentShaderSource = `
-        precision mediump float;
-        
-        varying vec3 vColor;
-        varying vec3 vNormal;
-        
-        void main(void) {
-          // Simple lighting
-          vec3 lightDirection = normalize(vec3(1.0, 1.0, 1.0));
-          float lightIntensity = max(dot(normalize(vNormal), lightDirection), 0.3);
-          
-          gl_FragColor = vec4(vColor * lightIntensity, 0.9);
-        }
-      `;
-
-      // Create and compile shader
-      function createShader(gl, type, source) {
-        const shader = gl.createShader(type);
-        gl.shaderSource(shader, source);
-        gl.compileShader(shader);
-
-        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-          console.error('An error occurred compiling the shaders: ' + gl.getShaderInfoLog(shader));
-          gl.deleteShader(shader);
-          return null;
-        }
-
-        return shader;
-      }
-
-      // Initialize shader program
-      function initShaderProgram(gl) {
-        const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
-        const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
-
-        const shaderProgram = gl.createProgram();
-        gl.attachShader(shaderProgram, vertexShader);
-        gl.attachShader(shaderProgram, fragmentShader);
-        gl.linkProgram(shaderProgram);
-
-        if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
-          console.error('Unable to initialize the shader program: ' + gl.getProgramInfoLog(shaderProgram));
-          return null;
-        }
-
-        return shaderProgram;
-      }
-
-      // Create cube geometry
-      function initBuffers(gl) {
-        // Cube vertices with normals
-        const vertices = new Float32Array([
-          // Front face
-          -0.1, -0.1,  0.1,  0.0,  0.0,  1.0,
-           0.1, -0.1,  0.1,  0.0,  0.0,  1.0,
-           0.1,  0.1,  0.1,  0.0,  0.0,  1.0,
-          -0.1,  0.1,  0.1,  0.0,  0.0,  1.0,
-
-          // Back face
-          -0.1, -0.1, -0.1,  0.0,  0.0, -1.0,
-          -0.1,  0.1, -0.1,  0.0,  0.0, -1.0,
-           0.1,  0.1, -0.1,  0.0,  0.0, -1.0,
-           0.1, -0.1, -0.1,  0.0,  0.0, -1.0,
-
-          // Top face
-          -0.1,  0.1, -0.1,  0.0,  1.0,  0.0,
-          -0.1,  0.1,  0.1,  0.0,  1.0,  0.0,
-           0.1,  0.1,  0.1,  0.0,  1.0,  0.0,
-           0.1,  0.1, -0.1,  0.0,  1.0,  0.0,
-
-          // Bottom face
-          -0.1, -0.1, -0.1,  0.0, -1.0,  0.0,
-           0.1, -0.1, -0.1,  0.0, -1.0,  0.0,
-           0.1, -0.1,  0.1,  0.0, -1.0,  0.0,
-          -0.1, -0.1,  0.1,  0.0, -1.0,  0.0,
-
-          // Right face
-           0.1, -0.1, -0.1,  1.0,  0.0,  0.0,
-           0.1,  0.1, -0.1,  1.0,  0.0,  0.0,
-           0.1,  0.1,  0.1,  1.0,  0.0,  0.0,
-           0.1, -0.1,  0.1,  1.0,  0.0,  0.0,
-
-          // Left face
-          -0.1, -0.1, -0.1, -1.0,  0.0,  0.0,
-          -0.1, -0.1,  0.1, -1.0,  0.0,  0.0,
-          -0.1,  0.1,  0.1, -1.0,  0.0,  0.0,
-          -0.1,  0.1, -0.1, -1.0,  0.0,  0.0,
-        ]);
-
-        const indices = [
-          0,  1,  2,      0,  2,  3,    // front
-          4,  5,  6,      4,  6,  7,    // back
-          8,  9,  10,     8,  10, 11,   // top
-          12, 13, 14,     12, 14, 15,   // bottom
-          16, 17, 18,     16, 18, 19,   // right
-          20, 21, 22,     20, 22, 23,   // left
+      function createComplexPolygonMesh() {
+        // build a star-like shape and extrude it (same approach you had before)
+        const shape = new THREE.Shape();
+        const points = [
+          [0, 0.45],
+          [0.12, 0.12],
+          [0.45, 0],
+          [0.12, -0.12],
+          [0, -0.45],
+          [-0.12, -0.12],
+          [-0.45, 0],
+          [-0.12, 0.12]
         ];
+        shape.moveTo(points[0][0], points[0][1]);
+        for (let i=1;i<points.length;i++) shape.lineTo(points[i][0], points[i][1]);
+        shape.lineTo(points[0][0], points[0][1]);
 
-        const vertexBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+        // hole
+        const holePath = new THREE.Path();
+        holePath.absellipse(0,0,0.08,0.08,0,Math.PI*2,false,0);
+        shape.holes.push(holePath);
 
-        const indexBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+        const extrudeSettings = { depth: 0.12, bevelEnabled: true, bevelThickness:0.015, bevelSize:0.02, bevelSegments:2 };
+        const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        geom.computeVertexNormals();
 
-        return {
-          vertex: vertexBuffer,
-          index: indexBuffer,
-          vertexCount: indices.length
-        };
+        const mat = new THREE.MeshStandardMaterial({ color: colors[colorIndex], metalness: 0.3, roughness:0.45, side: THREE.DoubleSide });
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.castShadow = true;
+        mesh.receiveShadow = false;
+
+        // center so it sits on plane
+        geom.computeBoundingBox();
+        const min = geom.boundingBox.min;
+        mesh.position.y = -min.y + 0.01;
+
+        // make it easier to raycast by setting name and enabling matrix updates
+        mesh.name = 'complexPolygon';
+        mesh.userData.selectable = true;
+        return mesh;
       }
 
-      // Draw cube at specified transform with color
-      function drawCube(gl, buffers, shaderProgram, projectionMatrix, modelViewMatrix, color, time) {
-        // Bind vertex buffer
-        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.vertex);
-        
-        const vertexPosition = gl.getAttribLocation(shaderProgram, 'aVertexPosition');
-        const vertexNormal = gl.getAttribLocation(shaderProgram, 'aVertexNormal');
-        
-        gl.vertexAttribPointer(vertexPosition, 3, gl.FLOAT, false, 24, 0);
-        gl.enableVertexAttribArray(vertexPosition);
-        
-        gl.vertexAttribPointer(vertexNormal, 3, gl.FLOAT, false, 24, 12);
-        gl.enableVertexAttribArray(vertexNormal);
+      // Pointer (tap/click) handler — works in both AR and preview
+      async function onPointerClick(event) {
+        // compute normalized screen coordinates
+        const canvas = renderer.domElement;
+        const rect = canvas.getBoundingClientRect();
+        const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
-        // Bind index buffer
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.index);
-
-        // Set uniforms
-        gl.uniformMatrix4fv(gl.getUniformLocation(shaderProgram, 'uProjectionMatrix'), false, projectionMatrix);
-        gl.uniformMatrix4fv(gl.getUniformLocation(shaderProgram, 'uModelViewMatrix'), false, modelViewMatrix);
-        gl.uniformMatrix4fv(gl.getUniformLocation(shaderProgram, 'uNormalMatrix'), false, modelViewMatrix);
-        gl.uniform3fv(gl.getUniformLocation(shaderProgram, 'uColor'), color);
-        gl.uniform1f(gl.getUniformLocation(shaderProgram, 'uTime'), time);
-
-        // Draw
-        gl.drawElements(gl.TRIANGLES, buffers.vertexCount, gl.UNSIGNED_SHORT, 0);
-      }
-
-      function checkSupportedState() {
-        navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
-          if (supported) {
-            xrButton.innerHTML = 'Enter AR';
+        // If we're in an XR session and we have a hitTestSource, prefer using hit-test
+        if (xrSession && hitTestSource) {
+          // We cannot directly call frame from here; but we can request a transient hit test by using viewer space hit test using getFrame via a temporary requestAnimationFrame callback.
+          // Simpler: attempt to use the last known reticle position. If reticle visible, consider this a placement/touch.
+          if (reticle.visible) {
+            // If object is close to reticle, toggle color instead of re-placing
+            const retPos = new THREE.Vector3().setFromMatrixPosition(reticle.matrix);
+            const objPos = new THREE.Vector3();
+            object3D.getWorldPosition(objPos);
+            const dist = retPos.distanceTo(objPos);
+            if (dist < 0.12) {
+              cycleColor();
+              return;
+            } else {
+              // place object at reticle position
+              placeAtMatrix(reticle.matrix);
+              return;
+            }
           } else {
-            xrButton.innerHTML = 'AR not found';
+            // no reticle — ignore or inform user
+            console.log('No hit at tap location (reticle not visible).');
+            return;
           }
-          xrButton.disabled = !supported;
-        });
-      }
-
-      function initXR() {
-        if (!window.isSecureContext) {
-          let message = "WebXR unavailable due to insecure context";
-          document.getElementById("warning-zone").innerText = message;
         }
 
-        if (navigator.xr) {
-          xrButton.addEventListener('click', onButtonClicked);
-          navigator.xr.addEventListener('devicechange', checkSupportedState);
-          checkSupportedState();
+        // Non-AR: use raycaster against scene
+        const pointer = new THREE.Vector2(x, y);
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(pointer, camera);
+        const intersects = raycaster.intersectObject(object3D, true);
+        if (intersects.length > 0) {
+          // tapped the object -> change color
+          cycleColor();
+          return;
+        }
+
+        // Intersect with ground plane (y=0) to place object
+        const planeY = 0;
+        const origin = raycaster.ray.origin;
+        const dir = raycaster.ray.direction;
+        if (Math.abs(dir.y) > 1e-6) {
+          const t = (planeY - origin.y) / dir.y;
+          if (t > 0) {
+            const p = origin.clone().add(dir.clone().multiplyScalar(t));
+            // build matrix from position, preserve default rotation
+            const m = new THREE.Matrix4();
+            m.makeTranslation(p.x, p.y, p.z);
+            placeAtMatrix(m);
+            return;
+          }
         }
       }
 
-      function onButtonClicked() {
+      // Place the object at a given matrix (Matrix4).
+      // Try to create an XR anchor for stability; if not available, save the matrix to reapply each frame.
+      async function placeAtMatrix(matrix) {
+        // apply to object immediately (also disable object auto updates)
+        object3D.matrixAutoUpdate = false;
+        object3D.visible = true;
+        object3D.matrix.copy(matrix);
+
+        // try to create XR anchor if in session
+        if (xrSession && xrRefSpace && xrSession.requestAnimationFrame) {
+          try {
+            if (xrSession.requestHitTestSourceForTransientInput) {
+              // Not needed here; we'll try anchors from a hit test result if available.
+            }
+            // If an anchor creation API is available via hit test result, we would use it.
+            // We'll attempt to create an anchor from the matrix by converting it into an XRRigidTransform
+            if (xrSession.createAnchor) {
+              // create transform from the matrix
+              const pos = new THREE.Vector3();
+              const quat = new THREE.Quaternion();
+              const scale = new THREE.Vector3();
+              matrix.decompose(pos, quat, scale);
+              const xrTransform = new XRRigidTransform(
+                { x: pos.x, y: pos.y, z: pos.z },
+                { x: quat.x, y: quat.y, z: quat.z, w: quat.w }
+              );
+              // create anchor in reference space
+              const created = await xrSession.createAnchor(xrTransform, xrRefSpace).catch(()=>null);
+              if (created) {
+                anchor = created;
+                console.log('Anchor created and object is now sticky via XRAnchor.');
+              } else {
+                // fallback: save matrix
+                savedPoseMatrix = matrix.clone();
+                console.log('Anchor unavailable; saved matrix for sticky placement.');
+              }
+            } else {
+              // no anchor API — save matrix fallback
+              savedPoseMatrix = matrix.clone();
+              console.log('Anchor API not available; saved matrix for sticky placement.');
+            }
+          } catch (e) {
+            console.warn('Anchor creation failed, falling back to matrix store.', e);
+            savedPoseMatrix = matrix.clone();
+          }
+        } else {
+          // not in XR session -> local placement (preview)
+          savedPoseMatrix = matrix.clone();
+        }
+
+        placed = true;
+      }
+
+      function cycleColor() {
+        colorIndex = (colorIndex + 1) % colors.length;
+        if (object3D && object3D.material) {
+          object3D.material.color.setHex(colors[colorIndex]);
+        } else if (object3D && object3D.children && object3D.children.length) {
+          // in case of nested meshes
+          object3D.traverse((c) => { if (c.isMesh && c.material) c.material.color.setHex(colors[colorIndex]); });
+        }
+      }
+
+      function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      // XR start button / checks
+      async function checkSupportedState() {
+        if (!navigator.xr) {
+          xrButton.innerText = 'AR not available';
+          xrButton.disabled = true;
+          warningZone.innerText = 'navigator.xr not available — try Chrome on Android with ARCore installed.';
+          return;
+        }
+        try {
+          const supported = await navigator.xr.isSessionSupported('immersive-ar');
+          if (supported) {
+            xrButton.innerText = 'Enter AR';
+            xrButton.disabled = false;
+          } else {
+            xrButton.innerText = 'AR not supported';
+            xrButton.disabled = true;
+            warningZone.innerText = 'immersive-ar not supported on this device/browser.';
+          }
+        } catch (e) {
+          xrButton.innerText = 'AR check failed';
+          xrButton.disabled = true;
+          console.error('isSessionSupported error', e);
+          warningZone.innerText = 'Error checking AR support — see console.';
+        }
+      }
+
+      // Create session when user presses the button
+      async function onXRButtonClicked() {
         if (!xrSession) {
-          navigator.xr.requestSession('immersive-ar', {
-            requiredFeatures: ['hit-test'],
-            optionalFeatures: ['dom-overlay'],
-            domOverlay: {root: document.getElementById('overlay')}
-          }).then(onSessionStarted, onRequestSessionError);
+          // Request immersive-ar with hit-test (optional) and DOM overlay
+          const sessionInit = {
+            optionalFeatures: ['dom-overlay', 'hit-test', 'anchors', 'local-floor'],
+            domOverlay: { root: document.getElementById('overlay') }
+          };
+          try {
+            const session = await navigator.xr.requestSession('immersive-ar', sessionInit);
+            onSessionStarted(session);
+          } catch (err) {
+            alert('Failed to start AR session: ' + (err && err.message ? err.message : err));
+            console.error(err);
+          }
         } else {
           xrSession.end();
         }
       }
 
-      function onSessionStarted(session) {
+      // Session start
+      async function onSessionStarted(session) {
         xrSession = session;
-        xrButton.innerHTML = 'Exit AR';
-        document.getElementById('instructions').style.display = 'block';
+        sessionInfo.innerText = 'Session started';
+        xrButton.innerText = 'Exit AR';
+        xrButton.disabled = false;
 
-        if (session.domOverlayState) {
-          document.getElementById('session-info').innerHTML = 'DOM Overlay type: ' + session.domOverlayState.type;
+        // Use three.js to manage the session
+        try {
+          renderer.xr.enabled = true;
+          renderer.xr.setReferenceSpaceType('local'); // prefer local (or local-floor)
+          await renderer.xr.setSession(session);
+        } catch (e) {
+          console.error('three.js xr setSession failed, falling back to manual XRWebGLLayer. Error:', e);
+          // fallback (rare) — try manual approach
+          const gl = renderer.getContext();
+          await gl.makeXRCompatible();
+          session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
         }
 
-        session.addEventListener('end', onSessionEnded);
-        session.addEventListener('select', onSelect);
-
-        let canvas = document.createElement('canvas');
-        gl = canvas.getContext('webgl', {
-          xrCompatible: true
-        });
-
-        // Initialize WebGL resources
-        shaderProgram = initShaderProgram(gl);
-        cubeBuffer = initBuffers(gl);
-
-        // Enable depth testing and blending
-        gl.enable(gl.DEPTH_TEST);
-        gl.enable(gl.BLEND);
-        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
-        session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
-        
-        session.requestReferenceSpace('local').then((refSpace) => {
-          xrRefSpace = refSpace;
-          
-          // Request hit test source
-          session.requestHitTestSource({ space: refSpace }).then((source) => {
+        // request reference space & hit-test source
+        xrRefSpace = await session.requestReferenceSpace('local-floor').catch(()=>null) || await session.requestReferenceSpace('local');
+        const viewerSpace = await session.requestReferenceSpace('viewer').catch(()=>null);
+        if (viewerSpace && session.requestHitTestSource) {
+          session.requestHitTestSource({ space: viewerSpace }).then((source) => {
             hitTestSource = source;
-          });
-          
-          session.requestAnimationFrame(onXRFrame);
+          }).catch((e) => { console.warn('Hit test source request failed:', e); });
+        }
+
+        // handle end
+        session.addEventListener('end', onSessionEnded);
+
+        // Try to listen to select events from XR input sources (tap in AR)
+        session.addEventListener('select', (ev) => {
+          // If we have a hit test source and a reticle we already place on tap — but handle select to toggle color if close
+          if (reticle && reticle.visible) {
+            const retPos = new THREE.Vector3().setFromMatrixPosition(reticle.matrix);
+            const objPos = new THREE.Vector3();
+            object3D.getWorldPosition(objPos);
+            const dist = retPos.distanceTo(objPos);
+            if (dist < 0.12) {
+              cycleColor();
+            } else {
+              placeAtMatrix(reticle.matrix);
+            }
+          }
         });
-      }
 
-      function onRequestSessionError(ex) {
-        alert("Failed to start immersive AR session.");
-        console.error(ex.message);
-      }
-
-      function onSessionEnded(event) {
-        xrSession = null;
-        xrButton.innerHTML = 'Enter AR';
-        document.getElementById('session-info').innerHTML = '';
-        document.getElementById('instructions').style.display = 'none';
-        hitTestSource = null;
-        placedCubes = [];
-        gl = null;
-      }
-
-      function onSelect(event) {
-        if (reticle && hitTestSource) {
-          // Place a cube at the reticle position
-          const cube = {
-            transform: new Float32Array(reticle.transform.matrix),
-            color: [Math.random(), Math.random(), Math.random()],
-            time: Date.now()
-          };
-          placedCubes.push(cube);
-          console.log('Cube placed at', cube.transform[12], cube.transform[13], cube.transform[14]);
+        // Inform overlay about DOM overlay support
+        if (session.domOverlayState) {
+          sessionInfo.innerText = 'DOM Overlay type: ' + session.domOverlayState.type;
+        } else {
+          sessionInfo.innerText = 'DOM Overlay not enabled.';
         }
       }
 
-      function onXRFrame(t, frame) {
-        let session = frame.session;
-        session.requestAnimationFrame(onXRFrame);
+      function onSessionEnded() {
+        xrSession = null;
+        sessionInfo.innerText = '';
+        xrButton.innerText = 'Enter AR';
+        hitTestSource = null;
+        anchor = null;
+        savedPoseMatrix = null;
+        placed = false;
+        // return to preview mode: ensure object visible and at origin
+        object3D.matrixAutoUpdate = true;
+        object3D.position.set(0,0,0);
+        object3D.rotation.set(0,0,0);
+      }
 
-        gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
-
-        const width = session.renderState.baseLayer.framebufferWidth;
-        const height = session.renderState.baseLayer.framebufferHeight;
-        gl.viewport(0, 0, width, height);
-
-        gl.clearColor(0, 0, 0, 0);
-        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-        let pose = frame.getViewerPose(xrRefSpace);
-        if (pose) {
-          const p = pose.transform.position;
-          document.getElementById('pose').innerText = "Position: " +
-            p.x.toFixed(3) + ", " + p.y.toFixed(3) + ", " + p.z.toFixed(3);
-
-          // Handle hit testing
+      // Render loop — will receive XRFrame when in AR
+      function render(time, xrFrame) {
+        // If we're in XR and have a frame, update reticle from hit test
+        if (xrFrame && xrSession) {
           if (hitTestSource) {
-            const hitTestResults = frame.getHitTestResults(hitTestSource);
-            if (hitTestResults.length > 0) {
-              const hit = hitTestResults[0];
-              reticle = hit.getPose(xrRefSpace);
+            const hitResults = xrFrame.getHitTestResults(hitTestSource);
+            if (hitResults.length > 0) {
+              const hit = hitResults[0];
+              const pose = hit.getPose(xrRefSpace);
+              if (pose) {
+                // copy pose into reticle
+                const mat = new THREE.Matrix4().fromArray(pose.transform.matrix);
+                reticle.visible = true;
+                reticle.matrix.copy(mat);
+              } else {
+                reticle.visible = false;
+              }
+            } else {
+              reticle.visible = false;
             }
           }
 
-          gl.useProgram(shaderProgram);
-
-          for (let view of pose.views) {
-            let viewport = session.renderState.baseLayer.getViewport(view);
-            gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
-
-            // Draw placed cubes
-            placedCubes.forEach((cube) => {
-              const currentTime = Date.now();
-              const age = currentTime - cube.time;
-              
-              // Create model matrix from stored transform
-              const modelMatrix = Mat4.create();
-              modelMatrix.set(cube.transform);
-              
-              // Scale the cube
-              const scaleMatrix = Mat4.create();
-              Mat4.identity(scaleMatrix);
-              Mat4.scale(scaleMatrix, scaleMatrix, [1, 1, 1]);
-              
-              const finalMatrix = Mat4.create();
-              Mat4.multiply(finalMatrix, modelMatrix, scaleMatrix);
-              
-              // Combine with view matrix
-              const modelViewMatrix = Mat4.create();
-              Mat4.multiply(modelViewMatrix, view.transform.inverse.matrix, finalMatrix);
-
-              drawCube(gl, cubeBuffer, shaderProgram, view.projectionMatrix, modelViewMatrix, cube.color, currentTime);
-            });
-
-            // Draw reticle (simple ring)
-            if (reticle) {
-              const reticleMatrix = Mat4.create();
-              reticleMatrix.set(reticle.transform.matrix);
-              
-              const scaleMatrix = Mat4.create();
-              Mat4.identity(scaleMatrix);
-              Mat4.scale(scaleMatrix, scaleMatrix, [0.5, 0.02, 0.5]);
-              
-              const finalMatrix = Mat4.create();
-              Mat4.multiply(finalMatrix, reticleMatrix, scaleMatrix);
-              
-              const modelViewMatrix = Mat4.create();
-              Mat4.multiply(modelViewMatrix, view.transform.inverse.matrix, finalMatrix);
-
-              drawCube(gl, cubeBuffer, shaderProgram, view.projectionMatrix, modelViewMatrix, [0, 1, 1], Date.now());
+          // If we have an anchor, update object's matrix from its anchor space pose
+          if (anchor) {
+            try {
+              const anchorPose = xrFrame.getPose(anchor.anchorSpace, xrRefSpace);
+              if (anchorPose) {
+                object3D.matrix.fromArray(anchorPose.transform.matrix);
+                object3D.matrixAutoUpdate = false;
+              }
+            } catch (e) {
+              // ignore if anchor pose not available this frame
             }
+          } else if (savedPoseMatrix) {
+            // fallback: reapply the saved matrix so object stays in the same world spot
+            object3D.matrix.copy(savedPoseMatrix);
+            object3D.matrixAutoUpdate = false;
+          }
+
+          // viewer pose (for diagnostics)
+          const viewerPose = xrFrame.getViewerPose(xrRefSpace);
+          if (viewerPose) {
+            const p = viewerPose.transform.position;
+            poseInfo.innerText = `Viewer: ${p.x.toFixed(3)}, ${p.y.toFixed(3)}, ${p.z.toFixed(3)}`;
+          } else {
+            poseInfo.innerText = '(no viewer pose)';
           }
         } else {
-          document.getElementById('pose').innerText = "Position: (null pose)";
+          // preview mode: show simple rotation if not placed
+          if (!placed) {
+            object3D.rotation.y += 0.004;
+          } else if (object3D.matrixAutoUpdate === false && savedPoseMatrix) {
+            // when in preview and we've stored a matrix (from click), apply it to keep object sticky
+            object3D.matrix.copy(savedPoseMatrix);
+          }
         }
+
+        // Render scene
+        renderer.render(scene, camera);
       }
 
-      initXR();
+      // Initialize everything
+      initThree();
+      checkSupportedState();
+
+      // Hook up UI button
+      xrButton.addEventListener('click', onXRButtonClicked);
+
+      // Make sure canvas is xr-compatible if a session is started by other routes
+      if (navigator.xr) {
+        navigator.xr.addEventListener('devicechange', checkSupportedState);
+      }
     </script>
   </body>
 </html>
