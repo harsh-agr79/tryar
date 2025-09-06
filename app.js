@@ -12,6 +12,9 @@ class ARSpace {
         this.arSession = null;
         this.isARSupported = false;
         this.isLoading = false;
+        this.groundPlane = null;
+        this.controls = null;
+        this.modelType = null; // 'glb' or 'icosahedron'
         
         // UI elements
         this.arButton = document.getElementById('ar-button');
@@ -32,7 +35,7 @@ class ARSpace {
         // Initialize Three.js first
         this.initThreeJS();
         
-        // Load model
+        // Load model (GLB first, then fallback)
         await this.loadModel();
         
         // Check WebXR support
@@ -67,9 +70,10 @@ class ARSpace {
         // Scene
         this.scene = new THREE.Scene();
         
-        // Camera
+        // Camera - better positioning for viewing the icosahedron
         this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 1000);
-        this.camera.position.set(0, 1, 3);
+        this.camera.position.set(0, 2, 5);
+        this.camera.lookAt(0, 0, 0);
         
         // Renderer
         const canvas = document.getElementById('ar-canvas');
@@ -84,22 +88,120 @@ class ARSpace {
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         
-        // Lighting for AR
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        // Lighting setup as specified in instructions
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
         this.scene.add(ambientLight);
         
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-        directionalLight.position.set(10, 10, 5);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
+        directionalLight.position.set(10, 15, 10);
         directionalLight.castShadow = true;
         directionalLight.shadow.mapSize.width = 2048;
         directionalLight.shadow.mapSize.height = 2048;
+        directionalLight.shadow.camera.near = 0.5;
+        directionalLight.shadow.camera.far = 50;
+        directionalLight.shadow.camera.left = -15;
+        directionalLight.shadow.camera.right = 15;
+        directionalLight.shadow.camera.top = 15;
+        directionalLight.shadow.camera.bottom = -15;
         this.scene.add(directionalLight);
+        
+        // Create invisible ground plane to receive shadows
+        this.createGroundPlane();
         
         // Create reticle for AR surface detection
         this.createReticle();
         
+        // Simple mouse controls for non-AR mode
+        this.setupMouseControls();
+        
         // Handle window resize
         window.addEventListener('resize', () => this.onWindowResize());
+    }
+    
+    createGroundPlane() {
+        const groundGeometry = new THREE.PlaneGeometry(30, 30);
+        const groundMaterial = new THREE.ShadowMaterial({ opacity: 0.3 });
+        this.groundPlane = new THREE.Mesh(groundGeometry, groundMaterial);
+        this.groundPlane.rotation.x = -Math.PI / 2;
+        this.groundPlane.position.y = -3;
+        this.groundPlane.receiveShadow = true;
+        this.scene.add(this.groundPlane);
+    }
+    
+    setupMouseControls() {
+        let isDragging = false;
+        let previousMousePosition = { x: 0, y: 0 };
+        
+        this.renderer.domElement.addEventListener('mousedown', (e) => {
+            if (!this.arSession) {
+                isDragging = true;
+                previousMousePosition = { x: e.clientX, y: e.clientY };
+                e.preventDefault();
+            }
+        });
+        
+        this.renderer.domElement.addEventListener('mousemove', (e) => {
+            if (isDragging && !this.arSession) {
+                const deltaMove = {
+                    x: e.clientX - previousMousePosition.x,
+                    y: e.clientY - previousMousePosition.y
+                };
+                
+                // Rotate camera around the object instead of rotating the object
+                const spherical = new THREE.Spherical();
+                spherical.setFromVector3(this.camera.position);
+                spherical.theta -= deltaMove.x * 0.01;
+                spherical.phi += deltaMove.y * 0.01;
+                spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
+                
+                this.camera.position.setFromSpherical(spherical);
+                this.camera.lookAt(0, 0, 0);
+                
+                previousMousePosition = { x: e.clientX, y: e.clientY };
+                e.preventDefault();
+            }
+        });
+        
+        this.renderer.domElement.addEventListener('mouseup', (e) => {
+            isDragging = false;
+            e.preventDefault();
+        });
+        
+        // Touch controls
+        this.renderer.domElement.addEventListener('touchstart', (e) => {
+            if (!this.arSession && e.touches.length === 1) {
+                isDragging = true;
+                previousMousePosition = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+                e.preventDefault();
+            }
+        });
+        
+        this.renderer.domElement.addEventListener('touchmove', (e) => {
+            if (isDragging && !this.arSession && e.touches.length === 1) {
+                const deltaMove = {
+                    x: e.touches[0].clientX - previousMousePosition.x,
+                    y: e.touches[0].clientY - previousMousePosition.y
+                };
+                
+                // Rotate camera around the object
+                const spherical = new THREE.Spherical();
+                spherical.setFromVector3(this.camera.position);
+                spherical.theta -= deltaMove.x * 0.01;
+                spherical.phi += deltaMove.y * 0.01;
+                spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
+                
+                this.camera.position.setFromSpherical(spherical);
+                this.camera.lookAt(0, 0, 0);
+                
+                previousMousePosition = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+                e.preventDefault();
+            }
+        });
+        
+        this.renderer.domElement.addEventListener('touchend', (e) => {
+            isDragging = false;
+            e.preventDefault();
+        });
     }
     
     createReticle() {
@@ -115,138 +217,85 @@ class ARSpace {
     }
     
     async loadModel() {
-        this.showStatus('Loading 3D robot model...');
+        this.showStatus('Loading test.glb model...');
         this.isLoading = true;
         
-        // Create a complex procedural robot model
-        this.createProceduralModel();
+        // Try to load GLB first
+        const loader = new THREE.GLTFLoader();
         
-        this.isLoading = false;
-    }
-    
-    createProceduralModel() {
-        console.log('Creating procedural robot model...');
-        
-        // Create a complex procedural robot model
-        const robotGroup = new THREE.Group();
-        
-        // Materials
-        const bodyMaterial = new THREE.MeshStandardMaterial({ 
-            color: 0x4a90e2, 
-            metalness: 0.7, 
-            roughness: 0.2 
-        });
-        const accentMaterial = new THREE.MeshStandardMaterial({ 
-            color: 0xff6b35, 
-            metalness: 0.8, 
-            roughness: 0.1 
-        });
-        const eyeMaterial = new THREE.MeshStandardMaterial({ 
-            color: 0x00ff88, 
-            emissive: 0x004422 
-        });
-        
-        // Body (main torso)
-        const bodyGeometry = new THREE.BoxGeometry(1, 1.2, 0.6);
-        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-        body.position.y = 0;
-        body.castShadow = true;
-        body.receiveShadow = true;
-        robotGroup.add(body);
-        
-        // Head
-        const headGeometry = new THREE.BoxGeometry(0.8, 0.8, 0.8);
-        const head = new THREE.Mesh(headGeometry, bodyMaterial);
-        head.position.y = 1;
-        head.castShadow = true;
-        head.receiveShadow = true;
-        robotGroup.add(head);
-        
-        // Eyes
-        const eyeGeometry = new THREE.SphereGeometry(0.1, 16, 16);
-        const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
-        leftEye.position.set(-0.2, 1.1, 0.35);
-        leftEye.castShadow = true;
-        const rightEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
-        rightEye.position.set(0.2, 1.1, 0.35);
-        rightEye.castShadow = true;
-        robotGroup.add(leftEye, rightEye);
-        
-        // Arms
-        const armGeometry = new THREE.CylinderGeometry(0.15, 0.15, 1, 8);
-        const leftArm = new THREE.Mesh(armGeometry, accentMaterial);
-        leftArm.position.set(-0.7, 0.2, 0);
-        leftArm.rotation.z = Math.PI / 6;
-        leftArm.castShadow = true;
-        leftArm.receiveShadow = true;
-        const rightArm = new THREE.Mesh(armGeometry, accentMaterial);
-        rightArm.position.set(0.7, 0.2, 0);
-        rightArm.rotation.z = -Math.PI / 6;
-        rightArm.castShadow = true;
-        rightArm.receiveShadow = true;
-        robotGroup.add(leftArm, rightArm);
-        
-        // Hands
-        const handGeometry = new THREE.SphereGeometry(0.2, 12, 12);
-        const leftHand = new THREE.Mesh(handGeometry, bodyMaterial);
-        leftHand.position.set(-1.1, -0.3, 0);
-        leftHand.castShadow = true;
-        leftHand.receiveShadow = true;
-        const rightHand = new THREE.Mesh(handGeometry, bodyMaterial);
-        rightHand.position.set(1.1, -0.3, 0);
-        rightHand.castShadow = true;
-        rightHand.receiveShadow = true;
-        robotGroup.add(leftHand, rightHand);
-        
-        // Legs
-        const legGeometry = new THREE.CylinderGeometry(0.2, 0.2, 1.2, 8);
-        const leftLeg = new THREE.Mesh(legGeometry, accentMaterial);
-        leftLeg.position.set(-0.3, -1.2, 0);
-        leftLeg.castShadow = true;
-        leftLeg.receiveShadow = true;
-        const rightLeg = new THREE.Mesh(legGeometry, accentMaterial);
-        rightLeg.position.set(0.3, -1.2, 0);
-        rightLeg.castShadow = true;
-        rightLeg.receiveShadow = true;
-        robotGroup.add(leftLeg, rightLeg);
-        
-        // Feet
-        const footGeometry = new THREE.BoxGeometry(0.4, 0.2, 0.6);
-        const leftFoot = new THREE.Mesh(footGeometry, bodyMaterial);
-        leftFoot.position.set(-0.3, -1.9, 0.1);
-        leftFoot.castShadow = true;
-        leftFoot.receiveShadow = true;
-        const rightFoot = new THREE.Mesh(footGeometry, bodyMaterial);
-        rightFoot.position.set(0.3, -1.9, 0.1);
-        rightFoot.castShadow = true;
-        rightFoot.receiveShadow = true;
-        robotGroup.add(leftFoot, rightFoot);
-        
-        // Antenna
-        const antennaGeometry = new THREE.CylinderGeometry(0.02, 0.02, 0.5, 8);
-        const antenna = new THREE.Mesh(antennaGeometry, accentMaterial);
-        antenna.position.set(0, 1.65, 0);
-        antenna.castShadow = true;
-        robotGroup.add(antenna);
-        
-        const antennaTipGeometry = new THREE.SphereGeometry(0.08, 8, 8);
-        const antennaTip = new THREE.Mesh(antennaTipGeometry, eyeMaterial);
-        antennaTip.position.set(0, 1.9, 0);
-        antennaTip.castShadow = true;
-        robotGroup.add(antennaTip);
-        
-        // Scale the model appropriately
-        robotGroup.scale.setScalar(0.3);
-        
-        // Position the model
-        robotGroup.position.set(0, -0.5, 0);
-        
-        this.model = robotGroup;
+        try {
+            const gltf = await new Promise((resolve, reject) => {
+                loader.load(
+                    'test.glb',
+                    resolve,
+                    (progress) => {
+                        console.log('Loading progress:', (progress.loaded / progress.total * 100) + '%');
+                    },
+                    reject
+                );
+            });
+            
+            console.log('GLB model loaded successfully');
+            this.modelType = 'glb';
+            this.model = gltf.scene;
+            
+            // Configure shadows for GLB model
+            this.model.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            
+            // Scale and position the model appropriately
+            this.model.scale.setScalar(0.5);
+            this.model.position.set(0, 0, 0);
+            
+            this.showSuccessStatus('GLB model loaded successfully!');
+            
+        } catch (error) {
+            console.log('GLB loading failed, creating fallback icosahedron:', error);
+            this.createFallbackIcosahedron();
+        }
         
         // Always add to scene for preview (will be removed when AR starts)
-        this.scene.add(this.model);
+        if (this.model) {
+            this.scene.add(this.model);
+        }
         
-        console.log('Robot model created and added to scene');
+        this.isLoading = false;
+        setTimeout(() => this.hideStatus(), 2000);
+    }
+    
+    createFallbackIcosahedron() {
+        console.log('Creating large polygonal icosahedron with shadows...');
+        this.modelType = 'icosahedron';
+        
+        // Create large icosahedron geometry as specified (radius: 2)
+        const geometry = new THREE.IcosahedronGeometry(2, 1);
+        
+        // Apply materials as specified in instructions
+        const material = new THREE.MeshStandardMaterial({
+            color: 0x4444ff,  // Blue color as specified
+            metalness: 0.3,   // As specified
+            roughness: 0.4    // As specified
+        });
+        
+        this.model = new THREE.Mesh(geometry, material);
+        
+        // Enable shadow casting and receiving as specified
+        this.model.castShadow = true;
+        this.model.receiveShadow = true;
+        
+        // Position at origin as specified
+        this.model.position.set(0, 0, 0);
+        
+        // Add rotation animation
+        this.model.userData.rotationSpeed = 0.01;
+        
+        this.showSuccessStatus('Polygonal icosahedron created with shadows!');
+        
+        console.log('Large polygonal icosahedron created successfully');
     }
     
     setupEventListeners() {
@@ -263,8 +312,12 @@ class ARSpace {
         
         this.stopArButton.addEventListener('click', () => this.stopAR());
         
-        // Touch/Click events for model placement
-        this.renderer.domElement.addEventListener('click', (event) => this.onSelect(event));
+        // Touch/Click events for model placement in AR mode only
+        this.renderer.domElement.addEventListener('click', (event) => {
+            if (this.arSession) {
+                this.onSelect(event);
+            }
+        });
         
         // XR Session events
         if (this.renderer.xr) {
@@ -308,7 +361,9 @@ class ARSpace {
         this.arButton.classList.add('hidden');
         this.stopArButton.classList.remove('hidden');
         this.reticleElement.classList.remove('hidden');
-        this.instructionText.textContent = 'Point your device at a surface and tap to place the robot';
+        
+        const modelText = this.modelType === 'glb' ? 'GLB model' : 'polygonal shape';
+        this.instructionText.textContent = `Point your device at a surface and tap to place the ${modelText}`;
         this.hideStatus();
         
         // Remove model from scene (it will be placed via AR interaction)
@@ -355,7 +410,8 @@ class ARSpace {
             this.scene.add(modelClone);
             this.placedModels.push(modelClone);
             
-            console.log('Robot model placed at:', modelClone.position);
+            const modelText = this.modelType === 'glb' ? 'GLB model' : 'polygonal icosahedron';
+            console.log(`${modelText} placed at:`, modelClone.position);
         }
     }
     
@@ -368,17 +424,26 @@ class ARSpace {
     showStatus(message) {
         this.statusText.textContent = message;
         this.statusElement.classList.remove('hidden');
+        this.statusElement.className = 'status status--info';
         this.container.classList.add('loading');
+    }
+    
+    showSuccessStatus(message) {
+        this.statusText.textContent = message;
+        this.statusElement.classList.remove('hidden');
+        this.statusElement.className = 'status status--success';
+        this.container.classList.add('success');
     }
     
     hideStatus() {
         this.statusElement.classList.add('hidden');
-        this.container.classList.remove('loading');
+        this.container.classList.remove('loading', 'success');
     }
     
     showFallbackMessage() {
         this.fallbackMessage.classList.remove('hidden');
-        this.instructionText.textContent = 'WebXR AR not available. Viewing 3D robot model in regular mode.';
+        const modelText = this.modelType === 'glb' ? 'GLB model' : 'polygonal icosahedron';
+        this.instructionText.textContent = `WebXR AR not available. Viewing ${modelText} in regular 3D mode. Use mouse/touch to rotate view.`;
     }
     
     animate() {
@@ -399,9 +464,13 @@ class ARSpace {
             }
         });
         
-        // Animate preview model (when not in AR)
+        // Animate preview model (when not in AR) - rotation animation as specified
         if (this.model && this.scene.children.includes(this.model) && !this.arSession) {
-            this.model.rotation.y += 0.01;
+            if (this.model.userData.rotationSpeed) {
+                this.model.rotation.y += this.model.userData.rotationSpeed;
+            } else {
+                this.model.rotation.y += 0.01;
+            }
         }
         
         this.renderer.render(this.scene, this.camera);
